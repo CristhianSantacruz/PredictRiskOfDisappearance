@@ -5,3 +5,4 @@ pandas
 tensorflow
 gunicorn
 scikit-learn
+pickle

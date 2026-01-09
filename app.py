@@ -1,360 +1,197 @@
+"""
+API Flask - Predicción de Desapariciones
+Endpoint único: POST /predecir
+"""
+
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 import numpy as np
 import pandas as pd
+import tensorflow as tf
+from tensorflow import keras
 import pickle
-from tensorflow.keras.models import load_model
-from datetime import datetime
 
 app = Flask(__name__)
-CORS(app)  # Permitir peticiones desde el frontend
+CORS(app)
 
-# =============================================================================
-# CARGAR MODELO Y SCALER
-# =============================================================================
+print("🔄 Cargando modelo...")
+model = keras.models.load_model('modelo_lstm_desapariciones.h5')
+print("✅ Modelo cargado")
 
-print("Cargando modelo...")
-modelo = load_model('modelo_lstm_desapariciones.h5')
-
-print("Cargando scaler...")
+print("🔄 Cargando scaler...")
 with open('scaler.pkl', 'rb') as f:
     scaler = pickle.load(f)
+print("✅ Scaler cargado")
 
-print("Cargando modelo simple...")
-modelo_simple = load_model('modelo_lstm_simple.h5')
+print("🔄 Cargando configuración...")
+with open('model_config.pkl', 'rb') as f:
+    config = pickle.load(f)
+print("✅ Configuración cargada")
 
-print("Cargando scaler simple...")
-with open('scaler_simple.pkl', 'rb') as f:
-    scaler_simple = pickle.load(f)
+SEQUENCE_LENGTH = config['sequence_length']
+FEATURE_COLUMNS = config['feature_columns']
 
+print(f"\n{'='*70}")
+print(f"✅ API LISTA PARA RECIBIR PETICIONES")
+print(f"{'='*70}\n")
 
-print("✅ Sistema listo")
+# ============================================================================
+# ENDPOINT: /predecir
+# ============================================================================
 
-# =============================================================================
-# FUNCIÓN DE PREDICCIÓN
-# =============================================================================
-
-def predecir_riesgo_punto(lat, long, fecha, rango_edad_cod, sexo_numerico=0.5):
+@app.route('/predecir', methods=['POST'])
+def predecir():
     """
-    Predice el nivel de riesgo para un punto geográfico.
+    Predice el riesgo de desapariciones para una fecha y ubicación futura
     
-    Args:
-        lat (float): Latitud
-        long (float): Longitud
-        fecha (str): Fecha en formato 'YYYY-MM-DD'
-        rango_edad_cod (int): 0=ADOLESCENTES, 1=ADULTO, 2=ADULTO MAYOR, 3=NIÑOS
-        sexo_numerico (float): 0=MUJER, 1=HOMBRE, 0.5=DESCONOCIDO
+    INPUT:
+    {
+        "fecha": "2026-06-15",
+        "provincia": "GUAYAS",
+        "latitud": -2.19,
+        "longitud": -79.90
+    }
     
-    Returns:
-        dict: Predicción con nivel de riesgo y probabilidades
+    OUTPUT:
+    {
+        "success": true,
+        "fecha": "2026-06-15",
+        "provincia": "GUAYAS",
+        "ubicacion": {"latitud": -2.19, "longitud": -79.90},
+        "nivel_riesgo": 2,
+        "riesgo": "Alto",
+        "confianza": 0.85,
+        "probabilidades": {"bajo": 0.05, "medio": 0.10, "alto": 0.85}
+    }
     """
     try:
-        # Parsear fecha
-        fecha_dt = pd.to_datetime(fecha)
+        # Obtener datos del request
+        data = request.get_json()
         
-        # Crear vector de características
-        entrada = np.array([[
-            float(lat),
-            float(long),
-            int(fecha_dt.month),
-            int(fecha_dt.dayofweek),
-            int(fecha_dt.day),
-            int(fecha_dt.year),
-            int(rango_edad_cod),
-            float(sexo_numerico)
-        ]])
+        if not data:
+            return jsonify({
+                "success": False,
+                "error": "No se recibieron datos"
+            }), 400
+        
+        # Validar campos requeridos
+        required = ['fecha', 'provincia', 'latitud', 'longitud']
+        missing = [f for f in required if f not in data]
+        
+        if missing:
+            return jsonify({
+                "success": False,
+                "error": f"Campos faltantes: {', '.join(missing)}",
+                "ejemplo": {
+                    "fecha": "2026-06-15",
+                    "provincia": "GUAYAS",
+                    "latitud": -2.19,
+                    "longitud": -79.90
+                }
+            }), 400
+        
+        # Extraer datos
+        fecha_input = data['fecha']
+        provincia = data['provincia'].upper().strip()
+        latitud = float(data['latitud'])
+        longitud = float(data['longitud'])
+        
+        # Parsear fecha
+        try:
+            fecha_dt = pd.to_datetime(fecha_input, format='%Y-%m-%d')
+        except:
+            try:
+                fecha_dt = pd.to_datetime(fecha_input, format='%d/%m/%Y')
+            except:
+                return jsonify({
+                    "success": False,
+                    "error": "Formato de fecha inválido. Use YYYY-MM-DD o DD/MM/YYYY"
+                }), 400
+        
+        mes = fecha_dt.month
+        dia = fecha_dt.day
+        dia_semana = fecha_dt.dayofweek + 1
+        
+        # Crear features (valores promedio/dummy para predicción)
+        features = {
+            'n_desapariciones': 0,  # Dummy, el modelo lo aprenderá del contexto
+            'nivel_riesgo': 0,      # Dummy
+            'latitud_desaparicion': latitud,
+            'longitud_desaparicion': longitud,
+            'mes': mes,
+            'dia_semana': dia_semana,
+            'dia': dia,
+            'rango_edad_sexo_numerico': 0  # Dummy
+        }
+        
+        # Crear array en el orden de FEATURE_COLUMNS
+        feature_array = np.array([[features[col] for col in FEATURE_COLUMNS]])
         
         # Normalizar
-        entrada_scaled = scaler.transform(entrada)
+        feature_scaled = scaler.transform(feature_array)
         
-        # Crear secuencia temporal (simular ventana de 12 pasos)
-        entrada_seq = np.tile(entrada_scaled, (1, 12, 1))
+        # Crear secuencia (repetir el patrón SEQUENCE_LENGTH veces)
+        sequence = np.array([np.repeat(feature_scaled, SEQUENCE_LENGTH, axis=0)])
         
         # Predecir
-        prediccion = modelo.predict(entrada_seq, verbose=0)
+        prediction = model.predict(sequence, verbose=0)
         
-        # Extraer resultados
-        nivel_riesgo = int(np.argmax(prediccion[0]))
-        probabilidades = prediccion[0].tolist()
+        # Procesar resultado
+        predicted_class = int(np.argmax(prediction[0]))
+        prob_bajo = float(prediction[0][0])
+        prob_medio = float(prediction[0][1])
+        prob_alto = float(prediction[0][2])
+        confianza = float(np.max(prediction[0]))
         
-        return {
-            'nivel_riesgo': nivel_riesgo,
-            'nivel_texto': ['Bajo', 'Medio', 'Alto'][nivel_riesgo],
-            'probabilidades': {
-                'bajo': round(probabilidades[0], 4),
-                'medio': round(probabilidades[1], 4),
-                'alto': round(probabilidades[2], 4)
-            },
-            'confianza': round(max(probabilidades), 4)
-        }
-    
-    except Exception as e:
-        raise Exception(f"Error en predicción: {str(e)}")
-
-def predecir_riesgo_simple(lat, long, fecha):
-    """
-    Predice el nivel de riesgo solo con fecha y coordenadas (modelo simple).
-    """
-    try:
-        fecha_dt = pd.to_datetime(fecha)
+        # Etiqueta del riesgo
+        riesgo_labels = {0: 'Bajo', 1: 'Medio', 2: 'Alto'}
+        etiqueta = riesgo_labels[predicted_class]
         
-        entrada = np.array([[
-            float(lat),
-            float(long),
-            int(fecha_dt.month),
-            int(fecha_dt.dayofweek),
-            int(fecha_dt.day),
-            int(fecha_dt.year)
-        ]])
-        
-        entrada_scaled = scaler_simple.transform(entrada)
-        entrada_seq = np.tile(entrada_scaled, (1, 12, 1))
-        prediccion = modelo_simple.predict(entrada_seq, verbose=0)
-        
-        nivel_riesgo = int(np.argmax(prediccion[0]))
-        probabilidades = prediccion[0].tolist()
-        
-        return {
-            'nivel_riesgo': nivel_riesgo,
-            'nivel_texto': ['Bajo', 'Medio', 'Alto'][nivel_riesgo],
-            'probabilidades': {
-                'bajo': round(probabilidades[0], 4),
-                'medio': round(probabilidades[1], 4),
-                'alto': round(probabilidades[2], 4)
-            },
-            'confianza': round(max(probabilidades), 4)
-        }
-    
-    except Exception as e:
-        raise Exception(f"Error en predicción: {str(e)}")
-# =============================================================================
-# ENDPOINTS DE LA API
-# =============================================================================
-
-@app.route('/', methods=['GET'])
-def home():
-    return jsonify({
-        'mensaje': 'API de Predicción de Riesgo de Desapariciones - Ecuador',
-        'version': '1.0',
-        'endpoints': {
-            '/predecir': 'POST - Predecir un solo punto con filtro como el rango de edad y el sexo',
-            '/predecir_lote': 'POST - Predecir múltiples puntos (para mapa de calor)'
-        }
-    })
-
-@app.route('/predecir-filter', methods=['POST'])
-def predecir_punto_endpoint():
-    """
-    Endpoint para predecir un solo punto.
-    
-    Body (JSON):
-    {
-        "lat": -2.125138401,
-        "long": -79.9209116,
-        "fecha": "2026-01-15",
-        "rango_edad_cod": 0,
-        "sexo_numerico": 1  (opcional, default=0.5)
-    }
-    """
-    try:
-        data = request.get_json()
-        
-        # Validar campos requeridos
-        campos_requeridos = ['lat', 'long', 'fecha',"rango_edad_cod","sexo_numerico"]
-        for campo in campos_requeridos:
-            if campo not in data:
-                return jsonify({'error': f'Campo requerido faltante: {campo}'}), 400
-        
-        # Extraer parámetros
-        lat = data['lat']
-        long = data['long']
-        fecha = data['fecha']
-        rango_edad_cod = data.get('rango_edad_cod',1)
-        sexo_numerico = data.get('sexo_numerico', 1)
-        
-        # Validar rangos
-        if not (-5 <= lat <= 2):  # Rango aproximado de Ecuador
-            return jsonify({'error': 'Latitud fuera del rango de Ecuador'}), 400
-        
-        if not (-82 <= long <= -75):  # Rango aproximado de Ecuador
-            return jsonify({'error': 'Longitud fuera del rango de Ecuador'}), 400
-        
-        if rango_edad_cod not in [0, 1, 2, 3]:
-            return jsonify({'error': 'rango_edad_cod debe ser 0, 1, 2 o 3'}), 400
-        
-        # Realizar predicción
-        resultado = predecir_riesgo_punto(lat, long, fecha, rango_edad_cod, sexo_numerico)
-        
+        # Respuesta
         return jsonify({
-            'exito': True,
-            'punto': {
-                'lat': lat,
-                'long': long,
-                'fecha': fecha
+            "success": True,
+            "fecha": fecha_dt.strftime('%Y-%m-%d'),
+            "provincia": provincia,
+            "ubicacion": {
+                "latitud": latitud,
+                "longitud": longitud
             },
-            'prediccion': resultado
-        })
-    
+            "nivel_riesgo": predicted_class,
+            "riesgo": etiqueta,
+            "confianza": round(confianza, 4),
+            "probabilidades": {
+                "bajo": round(prob_bajo, 4),
+                "medio": round(prob_medio, 4),
+                "alto": round(prob_alto, 4)
+            }
+        }), 200
+        
     except Exception as e:
         return jsonify({
-            'exito': False,
-            'error': str(e)
+            "success": False,
+            "error": str(e)
         }), 500
 
-
-@app.route('/predecir-riesgo', methods=['POST'])
-def predecir_riesgo_endpoint():
-    """
-    Endpoint para predecir solo con fecha y coordenadas.
-    
-    Body (JSON):
-    {
-        "lat": -2.125138401,
-        "long": -79.9209116,
-        "fecha": "2026-01-15"
-    }
-    """
-    try:
-        data = request.get_json()
-        
-        # Validar campos requeridos
-        campos_requeridos = ['lat', 'long', 'fecha']
-        for campo in campos_requeridos:
-            if campo not in data:
-                return jsonify({'error': f'Campo requerido faltante: {campo}'}), 400
-        
-        lat = data['lat']
-        long = data['long']
-        fecha = data['fecha']
-        
-        # Validar rangos
-        if not (-5 <= lat <= 2):
-            return jsonify({'error': 'Latitud fuera del rango de Ecuador'}), 400
-        
-        if not (-82 <= long <= -75):
-            return jsonify({'error': 'Longitud fuera del rango de Ecuador'}), 400
-        
-        # Realizar predicción
-        resultado = predecir_riesgo_simple(lat, long, fecha)
-        
-        return jsonify({
-            'exito': True,
-            'punto': {
-                'lat': lat,
-                'long': long,
-                'fecha': fecha
-            },
-            'prediccion': resultado
-        })
-    
-    except Exception as e:
-        return jsonify({
-            'exito': False,
-            'error': str(e)
-        }), 500
-
-
-@app.route('/predecir_lote', methods=['POST'])
-def predecir_lote():
-    """
-    Endpoint para predecir múltiples puntos (usado para generar mapa de calor).
-    
-    Body (JSON):
-    {
-        "puntos": [
-            {
-                "lat": -2.125138401,
-                "long": -79.9209116,
-                "fecha": "2026-01-15",
-                "rango_edad_cod": 0,
-                "sexo_numerico": 1
-            },
-            ...
-        ]
-    }
-    """
-    try:
-        data = request.get_json()
-        
-        if 'puntos' not in data:
-            return jsonify({'error': 'Campo "puntos" requerido'}), 400
-        
-        puntos = data['puntos']
-        
-        if not isinstance(puntos, list):
-            return jsonify({'error': '"puntos" debe ser una lista'}), 400
-        
-        resultados = []
-        
-        for i, punto in enumerate(puntos):
-            try:
-                # Extraer parámetros
-                lat = punto['lat']
-                long = punto['long']
-                fecha = punto['fecha']
-                rango_edad_cod = punto['rango_edad_cod']
-                sexo_numerico = punto.get('sexo_numerico', 0.5)
-                
-                # Predecir
-                prediccion = predecir_riesgo_punto(lat, long, fecha, rango_edad_cod, sexo_numerico)
-                
-                resultados.append({
-                    'index': i,
-                    'lat': lat,
-                    'long': long,
-                    'prediccion': prediccion
-                })
-            
-            except Exception as e:
-                resultados.append({
-                    'index': i,
-                    'error': str(e)
-                })
-        
-        return jsonify({
-            'exito': True,
-            'total_puntos': len(puntos),
-            'resultados': resultados
-        })
-    
-    except Exception as e:
-        return jsonify({
-            'exito': False,
-            'error': str(e)
-        }), 500
-
-@app.route('/info', methods=['GET'])
-def info():
-    """
-    Información sobre los códigos de entrada.
-    """
-    return jsonify({
-        'rango_edad_cod': {
-            0: 'ADOLESCENTES',
-            1: 'ADULTO',
-            2: 'ADULTO MAYOR',
-            3: 'NIÑOS(AS)'
-        },
-        'sexo_numerico': {
-            0: 'MUJER',
-            1: 'HOMBRE',
-         
-        },
-        'nivel_riesgo': {
-            0: 'Bajo (< 1 caso)',
-            1: 'Medio (1-3 casos)',
-            2: 'Alto (> 3 casos)'
-        },
-        'formato_fecha': 'YYYY-MM-DD',
-        'rango_ecuador': {
-            'latitud': '(-5, 2)',
-            'longitud': '(-82, -75)'
-        }
-    })
-
-# =============================================================================
-# EJECUTAR SERVIDOR
-# =============================================================================
+# ============================================================================
+# EJECUTAR
+# ============================================================================
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5000, debug=True)
+    print("\n" + "="*70)
+    print("    🚀 API DE PREDICCIÓN DE DESAPARICIONES")
+    print("="*70)
+    print("\n📍 Servidor: http://localhost:5000")
+    print("\n📋 Endpoint:")
+    print("   POST /predecir")
+    print("\n💡 Ejemplo:")
+    print("   curl -X POST http://localhost:5000/predecir \\")
+    print("     -H 'Content-Type: application/json' \\")
+    print("     -d '{")
+    print('       "fecha": "2026-06-15",')
+    print('       "provincia": "GUAYAS",')
+    print('       "latitud": -2.19,')
+    print('       "longitud": -79.90')
+    print("     }'")
+    print("\n" + "="*70 + "\n")
+    
+    app.run(debug=True, host='0.0.0.0', port=5000)
