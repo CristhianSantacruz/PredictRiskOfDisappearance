@@ -1,8 +1,6 @@
-Flask
-flask-cors
-numpy
-pandas
+flask
 tensorflow
-gunicorn
+numpy
+joblib
 scikit-learn
-pickle
+h5py
