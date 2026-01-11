@@ -3,23 +3,20 @@ from datetime import datetime, timedelta
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 from tensorflow.keras.models import load_model
+from pydantic import BaseModel
 import unicodedata
 import math
-# =========================
-# Inicializar Flask
-# =========================
+import joblib
 app = Flask(__name__)
 CORS(app)
 
-# =========================
-# Cargar modelos (.h5)
-# =========================
+
 modelo_riesgo = load_model("modelo_lstm_riesgo.h5", compile=False)
 modelo_geo = load_model("modelo_geo.h5", compile=False)
 
-# =========================
-# Provincias y códigos (OFICIALES)
-# =========================
+modelo_riesgo_punto = load_model("modelo_riesgo_punto_v2.h5", compile=False)
+scaler = joblib.load("scaler_modelo3.pkl")
+ETIQUETAS_RIESGO = ["BAJO", "MEDIO", "ALTO"]
 PROVINCIAS = {
     "PICHINCHA": 17,
     "GUAYAS": 9,
@@ -51,18 +48,17 @@ LAT_MIN = -5.0
 LAT_MAX = 1.5
 LON_MIN = -81.0
 LON_MAX = -75.0
-
-
-# =========================
-# Normalizar texto (quitar tildes)
-# =========================
 def normalizar(texto):
     texto = texto.upper().strip()
     texto = unicodedata.normalize("NFD", texto)
     texto = texto.encode("ascii", "ignore").decode("utf-8")
     return texto
 
-
+def normalizar_texto(texto):
+    texto = texto.upper().strip()
+    texto = unicodedata.normalize('NFD', texto)
+    texto = texto.encode('ascii', 'ignore').decode('utf-8')
+    return texto
 def denormalizar(valor_norm, min_val, max_val):
     return valor_norm * (max_val - min_val) + min_val
 def generar_batch_input(fecha_target):
@@ -87,9 +83,7 @@ def generar_batch_input(fecha_target):
     
     return np.array(batch_input_list), codigos_provincias
 
-# =========================
-# Crear secuencia LSTM (7 días)
-# =========================
+
 def crear_secuencia(fecha_target, cod_prov):
     secuencia = []
 
@@ -143,7 +137,9 @@ def prediccion_contexto():
 
     except Exception as e:
         return jsonify({"error": str(e)}), 500
-
+# =========================================================
+# ENDPOINT 2 — LOCALIZACION (Modelo 2)
+# =========================================================
 
 @app.route("/api/prediccion/localizacion", methods=["POST"])
 def prediccion_localizacion():
@@ -185,8 +181,8 @@ def prediccion_localizacion():
                 {
                     "lat": float(latlon[0]),
                     "lng": float(latlon[1]),
-                    "lat_real": float(lat_real),
-                    "lng_real": float(lon_real),
+                  #  "lat_real": float(lat_real),
+                 #   "lng_real": float(lon_real),
                     "peso": casos
                 }
             ]
@@ -194,7 +190,118 @@ def prediccion_localizacion():
 
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+# =========================================================
+# ENDPOINT 1 — PREDICCION DE RIESGO (Modelo 3)
+# =========================================================
 
+
+@app.route("/api/prediccion/punto", methods=["POST"])
+def predict_riesgo():
+    try:
+        data = request.get_json()
+
+        # 1️⃣ Validación básica
+        if not data:
+            return jsonify({"error": "JSON vacío"}), 400
+
+        fecha = data.get("fecha")
+        lat = data.get("lat")
+        lng = data.get("lng")
+        provincia = data.get("provincia")
+        
+
+        if not all([fecha, lat, lng, provincia]):
+            return jsonify({
+                "error": "Faltan campos requeridos",
+                "campos_requeridos": ["fecha", "lat", "lng", "provincia"]
+            }), 400
+
+        # 2️⃣ Validación de rangos
+        try:
+            lat = float(lat)
+            lng = float(lng)
+            provincia =  PROVINCIAS[provincia]
+        except ValueError:
+            return jsonify({"error": "Tipos de datos inválidos"}), 400
+
+        # 3️⃣ Parsear fecha
+        try:
+            fecha_dt = datetime.strptime(fecha, "%Y-%m-%d")
+        except ValueError:
+            return jsonify({"error": "Formato de fecha inválido. Use YYYY-MM-DD"}), 400
+
+        mes = fecha_dt.month
+        dia = fecha_dt.day
+        dia_semana = fecha_dt.weekday()
+
+        # 4️⃣ Construir input del modelo
+        sample = np.array([[
+            lat,
+            lng,
+            mes,
+            dia,
+            dia_semana,
+            provincia
+        ]], dtype=np.float32)
+
+      
+        if np.isnan(sample).any():
+            return jsonify({"error": "Datos de entrada contienen valores inválidos"}), 400
+
+      
+        sample_scaled = scaler.transform(sample)
+
+        if np.isnan(sample_scaled).any():
+            return jsonify({
+                "error": "Error en el escalado de datos",
+                "detalle": "Los valores están fuera del rango de entrenamiento"
+            }), 500
+
+        # 8️⃣ Predicción
+        riesgo_pred, n_pred = modelo_riesgo_punto.predict(sample_scaled, verbose=0)
+
+        # 9️⃣ Verificar que la predicción no generó NaN
+        if np.isnan(riesgo_pred).any() or np.isnan(n_pred).any():
+            return jsonify({
+                "error": "Error en la predicción del modelo",
+                "detalle": "El modelo generó valores inválidos (NaN)"
+            }), 500
+
+        # 🔟 Extraer resultados
+        codigo_riesgo = int(np.argmax(riesgo_pred[0]))
+        nivel_riesgo = ETIQUETAS_RIESGO[codigo_riesgo]
+        n_desapariciones = float(n_pred[0][0])
+
+        # Asegurar que n_desapariciones sea >= 0
+        n_desapariciones = max(0, n_desapariciones)
+
+        # 1️⃣1️⃣ Respuesta JSON
+        return jsonify({
+            "fecha": fecha,
+            "riesgo": {
+                "codigo": codigo_riesgo,
+                "nivel": nivel_riesgo,
+            },
+            "n_desapariciones": round(n_desapariciones, 2),
+            "ubicacion": {
+                "lat": lat,
+                "lng": lng,
+                "provincia": provincia
+            }
+        })
+
+    except Exception as e:
+        # Log del error para debugging
+        print(f"Error en predicción: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        
+        return jsonify({
+            "error": "Error interno del servidor",
+            "detalle": str(e)
+        }), 500
+
+#NO USAR
 @app.route('/predict_point_risk', methods=['POST'])
 def predict_point_risk():
     try:
@@ -272,8 +379,7 @@ def predict_point_risk():
 
     except Exception as e:
         return jsonify({'error': str(e)}), 500
-# =========================
-# Ejecutar servidor
-# =========================
+
+
 if __name__ == "__main__":
     app.run(debug=True, port=5000)
