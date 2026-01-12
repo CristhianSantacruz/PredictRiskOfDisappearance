@@ -156,40 +156,49 @@ def prediccion_localizacion():
 
         cod_prov = PROVINCIAS[provincia]
 
-        base_seq = crear_secuencia(fecha, cod_prov)[0]
+        # valores neutros (no disponibles en la API)
+        rango_edad_cod = 0
+        sexo_numerico = 0
 
         secuencia_geo = []
-        for fila in base_seq:
-            fila_geo = np.concatenate([
-                fila,
-                [1],        # bias
-                [riesgo],
-                [casos]
-            ])
-            secuencia_geo.append(fila_geo)
 
-        input_geo = np.array(secuencia_geo).reshape(1, 7, 8)
+        for i in range(7, 0, -1):
+            f = fecha - timedelta(days=i)
 
-        latlon = modelo_geo.predict(input_geo)[0]
-        
+            fila = [
+                f.day,
+                f.month,
+                f.year,
+                f.weekday(),
+                cod_prov,
+                rango_edad_cod,
+                sexo_numerico,
+                riesgo,
+                casos
+            ]
 
-        lat_real = denormalizar(latlon[0], LAT_MIN, LAT_MAX)
-        lon_real = denormalizar(latlon[1], LON_MIN, LON_MAX)
+            secuencia_geo.append(fila)
+
+        input_geo = np.array(secuencia_geo, dtype=np.float32).reshape(1, 7, 9)
+
+        latlon = modelo_geo.predict(input_geo, verbose=0)[0]
 
         return jsonify({
             "puntos": [
                 {
                     "lat": float(latlon[0]),
                     "lng": float(latlon[1]),
-                  #  "lat_real": float(lat_real),
-                 #   "lng_real": float(lon_real),
-                    "peso": casos
+                    "peso": round(casos, 2)
                 }
             ]
         })
 
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        return jsonify({
+            "error": "Error interno en predicción de localización",
+            "detalle": str(e)
+        }), 500
+
 # =========================================================
 # ENDPOINT 1 — PREDICCION DE RIESGO (Modelo 3)
 # =========================================================
@@ -301,9 +310,6 @@ def predict_riesgo():
             "detalle": str(e)
         }), 500
 
-#NO USAR
-@app.route('/predict_point_risk', methods=['POST'])
-def predict_point_risk():
     try:
         data = request.get_json()
         fecha_str = data.get('fecha')
