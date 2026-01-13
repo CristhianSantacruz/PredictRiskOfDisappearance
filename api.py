@@ -15,7 +15,7 @@ modelo_riesgo = load_model("modelo_lstm_riesgo.h5", compile=False)
 modelo_geo = load_model("modelo_geo.h5", compile=False)
 
 modelo_riesgo_punto = load_model("modelo_riesgo_punto_v2.h5", compile=False)
-scaler = joblib.load("scaler_modelo3.pkl")
+scaler = joblib.load("scaler_modelo3_lstm.pkl")
 ETIQUETAS_RIESGO = ["BAJO", "MEDIO", "ALTO"]
 PROVINCIAS = {
     "PICHINCHA": 17,
