@@ -89,12 +89,14 @@ def crear_secuencia(fecha_target, cod_prov):
 
     for i in range(7, 0, -1):
         f = fecha_target - timedelta(days=i)
-
+        
+        mes = math.sin(2 * np.pi * (f.month - 1) / 12)
+        dia_semana = math.sin(2 * np.pi * (f.weekday()) / 7)
         fila = [
-            f.month / 12.0,
-            f.day / 31.0,
-            (f.year - 2000) / 30.0,
-            f.weekday() / 6.0,
+            f.day,
+            mes,
+            dia_semana,
+            (f.year - 2017),
             cod_prov / 24.0
         ]
         secuencia.append(fila)
@@ -164,13 +166,15 @@ def prediccion_localizacion():
 
         for i in range(7, 0, -1):
             f = fecha - timedelta(days=i)
+            mes = math.sin(2 * np.pi * (f.month - 1) / 12)
+            dia_semana = math.sin(2 * np.pi * (f.weekday()) / 7)
 
             fila = [
                 f.day,
-                f.month,
-                f.year,
-                f.weekday(),
-                cod_prov,
+                mes,
+                (f.year - 2017),
+                dia_semana,
+                (cod_prov/24),
                 rango_edad_cod,
                 sexo_numerico,
                 riesgo,
